@@ -1,0 +1,23 @@
+[project]
+name = "news-article-analysis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "matijapavlovic8", email = "matija.p71@gmail.com" }
+]
+requires-python = ">=3.14.6"
+dependencies = [
+    "openai>=3.26.1",
+    "pandas>=3.0.6",
+    "psycopg[binary]>=3.3.6",
+]
+
+[project.scripts]
+news-article-analysis = "news_article_analysis:main"
+dump-benchmark = "news_article_analysis.dump_benchmark:main"
+run-tsa = "news_article_analysis.run_tsa:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
