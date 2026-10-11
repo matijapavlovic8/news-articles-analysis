@@ -54,27 +54,25 @@ SENTIMENT_LABELS = {0: "neutral", 1: "negative", 2: "positive"}
 # Only lightweight metadata is pulled for stratification; full rows are fetched
 # for the final selection only.
 CANDIDATE_SQL = """
-SELECT a.id,
-       a.portal,
-       a.date_published,
-       a.features_topics AS topics,
-       a.features_tsa AS tsa,
-       (SELECT COALESCE(SUM(jsonb_array_length(e)), 0)
-          FROM jsonb_array_elements(a.features -> 'ner' -> 'data') AS e
-       ) AS n_entities,
-       a.features -> 'ner' -> 'version' AS ner_version,
-       a.features -> 'tsa' -> 'version' AS tsa_version,
-       a.features -> 'topic_clf' -> 'version' AS topic_version
-FROM article a
-WHERE a.hidden = false
-  AND a.date_published IS NOT NULL
-  AND a.date_published >= now() - make_interval(years => %s)
-  AND a.title IS NOT NULL
-  AND a.body IS NOT NULL
-  AND a.features ? 'ner'
-  AND a.features ? 'tsa'
-  AND a.features ? 'topic_clf'
-  AND a.features -> 'ner' -> 'data' <> '[]'::jsonb
+SELECT id,
+       portal,
+       date_published,
+       features_topics AS topics,
+       features_tsa AS tsa,
+       features -> 'ner' -> 'version' AS ner_version,
+       features -> 'tsa' -> 'version' AS tsa_version,
+       features -> 'topic_clf' -> 'version' AS topic_version
+FROM article TABLESAMPLE SYSTEM ({sample_pct}) REPEATABLE ({seed})
+WHERE hidden = false
+  AND date_published IS NOT NULL
+  AND date_published >= now() - make_interval(years => %s)
+  AND title IS NOT NULL
+  AND body IS NOT NULL
+  AND features ? 'ner'
+  AND features ? 'tsa'
+  AND features ? 'topic_clf'
+  AND features -> 'ner' -> 'data' <> '[]'::jsonb
+LIMIT %s
 """
 
 FULL_ROW_SQL = """
@@ -185,12 +183,13 @@ def resolve_tsa(tsa_data, ner_data, tokens):
     return out
 
 
-def fetch_candidates(conn, years):
+def fetch_candidates(conn, years, sample_pct, pool_limit, seed):
     """Stream candidate metadata rows into a list of dicts."""
+    sql = CANDIDATE_SQL.format(sample_pct=sample_pct, seed=seed)
     rows = []
     with conn.cursor(name="bench_candidates") as cur:
         cur.itersize = 5000
-        cur.execute(CANDIDATE_SQL, (years,))
+        cur.execute(sql, (years, pool_limit))
         for rec in cur:
             rows.append(
                 {
@@ -199,12 +198,13 @@ def fetch_candidates(conn, years):
                     "date_published": rec[2],
                     "topics": rec[3] or [],
                     "tsa": rec[4] or [],
-                    "n_entities": rec[5],
-                    "ner_version": rec[6],
-                    "tsa_version": rec[7],
-                    "topic_version": rec[8],
+                    "ner_version": rec[5],
+                    "tsa_version": rec[6],
+                    "topic_version": rec[7],
                 }
             )
+            if len(rows) % 25000 == 0:
+                print(f"  ...{len(rows):,} candidates")
     return rows
 
 
@@ -377,6 +377,18 @@ def main():
         default=[],
         help="portal to exclude (repeatable), e.g. --exclude-portal face.ba",
     )
+    p.add_argument(
+        "--sample-pct",
+        type=float,
+        default=5.0,
+        help="TABLESAMPLE SYSTEM percentage for the candidate pool (default 5 gives ~60k candidates)",
+    )
+    p.add_argument(
+        "--pool-limit",
+        type=int,
+        default=150000,
+        help="hard cap on candidate pool rows (default 150000)",
+    )
     p.add_argument("--ner-version", default=None, help="require this ner feature version")
     p.add_argument("--tsa-version", default=None, help="require this tsa feature version")
     p.add_argument("--topic-version", default=None, help="require this topic_clf feature version")
@@ -392,8 +404,13 @@ def main():
     )
     print(f"Connecting to {args.host}:{args.port} db={args.dbname} user={args.user} ...")
     with psycopg.connect(conninfo) as conn:
-        print("Fetching candidate metadata ...")
-        pool = fetch_candidates(conn, args.years)
+        print(
+            f"Fetching candidate metadata "
+            f"(TABLESAMPLE {args.sample_pct}%, limit {args.pool_limit:,}) ..."
+        )
+        pool = fetch_candidates(
+            conn, args.years, args.sample_pct, args.pool_limit, args.seed
+        )
 
         # Version filters (versions are compared as strings: ner=1 int, tsa='v1' str).
         if args.ner_version is not None:

@@ -1,13 +1,14 @@
 import asyncio
 import os
+from tqdm.asyncio import tqdm as tqdm_asyncio
 from openai import OpenAI
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Literal
 import tomllib
 import json
 
-MODELS = ["gpt-6-luna", "gpt-6-terra"]
+MODELS = ["gpt-6-luna", "gpt-6-sol"]
 SENTIMENTS = {0: "neutral", 1: "negative", 2: "positive"}
 PROMPT = """
 Targeted sentiment analysis (TSA) is the task of determining the polarity of sentiment expressed towards the target entity. The entities mentioned in the title will be provided to you and the only thing you need to do is go through the title text and determine the sentiment towards each entity in it. The sentiment can be positive, neutral or negative. Here are a few examples of inputs with the expected output:
@@ -31,29 +32,31 @@ OUTPUT:
 	[{1: neutral}, {2: negative}]
 """
 
-with open("config.toml", "rb") as f:
+with open("secrets.toml", "rb") as f:
     secrets = tomllib.load(f)
 
 
-articles = pd.read_csv("data/articles.csv", delimiter="|")
+articles = pd.read_csv("data/benchmark.tsv", sep="\t")
 
 llm = OpenAI(
     api_key=secrets["OPENAI_API_KEY"],
-    base_url=secrets.get("OPENAI_BASE_URL")
 )
 
 semaphore = asyncio.Semaphore(len(MODELS)*10)
 
 class EntitySentiment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     i: int
     sentiment: Literal["neutral", "negative", "positive"]
 
 class TSAResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     entities: list[EntitySentiment]
 
 def inference(model: str, title: str, ner_data: str) -> TSAResponse:
     response = llm.responses.create(
         model=model,
+        temperature=0,
         reasoning=None,
         instructions=PROMPT,
         input=f"""
@@ -97,7 +100,7 @@ async def run_tsa() -> list:
         if not ner_data:
             continue
         tasks.extend(one(model, article, ner_data) for model in MODELS)
-    return await asyncio.gather(*tasks)
+    return await tqdm_asyncio.gather(*tasks)
 
 
 
