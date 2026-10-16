@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import tomllib
 
 import pandas as pd
@@ -12,6 +13,7 @@ with open("secrets.toml", "rb") as f:
 llm = OpenAI(api_key=secrets["OPENAI_API_KEY"])
 
 MODEL = "gpt-6-luna"  # the only decisions model
+OUT = "results/topic_decisions.jsonl"
 
 TOPICS = [
     "ARTS, CULTURE, ENTERTAINMENT AND MEDIA",
@@ -76,7 +78,17 @@ def inference(title: str, body: str):
 semaphore = asyncio.Semaphore(10)
 
 
-async def one(article) -> dict:
+def load_done() -> set:
+    done = set()
+    if os.path.exists(OUT):
+        for line in open(OUT):
+            r = json.loads(line)
+            if "error" not in r:
+                done.add(r["id"])
+    return done
+
+
+async def one(article, out) -> dict:
     async with semaphore:
         try:
             resp = await asyncio.to_thread(
@@ -99,7 +111,7 @@ async def one(article) -> dict:
                 reverse=True,
             )
             topics = ([primary] if primary else []) + rest
-            return {
+            result = {
                 "id": article["id"],
                 "model": MODEL,
                 "topics": topics,
@@ -109,20 +121,28 @@ async def one(article) -> dict:
                 "gold": article["topics"],
             }
         except Exception as e:
-            return {
+            result = {
                 "id": article["id"],
                 "model": MODEL,
                 "error": str(e),
             }
+    out.write(json.dumps(result, ensure_ascii=False) + "\n")
+    out.flush()
+    return result
 
 
 async def run_topic():
     articles = pd.read_csv("data/benchmark.tsv", sep="\t")
-    tasks = [one(article) for _, article in articles.iterrows()]
-    results = await tqdm.gather(*tasks)
-    with open("results/topic_decisions.jsonl", "w") as f:
-        for r in results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    done = load_done()
+    os.makedirs("results", exist_ok=True)
+    with open(OUT, "a") as out:
+        tasks = [
+            one(article, out)
+            for _, article in articles.iterrows()
+            if article["id"] not in done
+        ]
+        print(f"{len(done)} records already done, running {len(tasks)}")
+        results = await tqdm.gather(*tasks)
     errors = sum(1 for r in results if "error" in r)
     print(f"topic: {len(results)} records, {errors} errors")
 

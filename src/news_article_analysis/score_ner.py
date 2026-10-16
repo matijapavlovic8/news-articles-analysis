@@ -23,10 +23,16 @@ def prf(tp, fp, fn):
 
 
 def main():
-    rows = []
+    rows = {}
     with open("results/ner.jsonl") as f:
         for line in f:
-            rows.append(json.loads(line))
+            r = json.loads(line)
+            k = (r["id"], r["model"])
+            if "error" in r:
+                rows.setdefault(k, r)
+            else:
+                rows[k] = r
+    rows = list(rows.values())
 
     per_model = defaultdict(lambda: {
         "tp": Counter(), "fp": Counter(), "fn": Counter(),

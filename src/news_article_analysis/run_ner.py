@@ -9,7 +9,8 @@ from tqdm.asyncio import tqdm as tqdm_asyncio
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict
 
-MODELS = ["gpt-6-luna", "gpt-6-sol"]
+MODELS = ["gpt-6-luna"]
+OUT = "results/ner.jsonl"
 
 PROMPT = """
 You are an expert at named entity recognition (NER). You are given a Croatian
@@ -75,7 +76,6 @@ def format_tokens(tokens) -> str:
 def inference(model: str, token_block: str) -> NerResponse:
     response = llm.responses.create(
         model=model,
-        temperature=0,
         instructions=PROMPT,
         input=token_block,
         text={
@@ -90,33 +90,50 @@ def inference(model: str, token_block: str) -> NerResponse:
     return NerResponse.model_validate_json(response.output_text)
 
 
-async def one(model, article) -> dict:
+def load_done() -> set:
+    done = set()
+    if os.path.exists(OUT):
+        for line in open(OUT):
+            r = json.loads(line)
+            if "error" not in r:
+                done.add((r["id"], r["model"]))
+    return done
+
+
+async def one(model, article, out) -> dict:
     async with semaphore:
         try:
             tokens = json.loads(article["tokens"])
             resp = await asyncio.to_thread(inference, model, format_tokens(tokens))
-            return {
+            result = {
                 "id": article["id"],
                 "model": model,
                 "ner": resp.model_dump()["entities"],
                 "gold": article["ner"],
             }
         except Exception as e:
-            return {"id": article["id"], "model": model, "error": str(e)}
+            result = {"id": article["id"], "model": model, "error": str(e)}
+    out.write(json.dumps(result, ensure_ascii=False) + "\n")
+    out.flush()
+    return result
 
 
 async def run_ner() -> list:
-    tasks = []
-    for _, article in articles.iterrows():
-        if not isinstance(article["tokens"], str):
-            continue
-        tasks.extend(one(model, article) for model in MODELS)
-    return await tqdm_asyncio.gather(*tasks)
+    done = load_done()
+    os.makedirs("results", exist_ok=True)
+    with open(OUT, "a") as out:
+        tasks = []
+        for _, article in articles.iterrows():
+            if not isinstance(article["tokens"], str):
+                continue
+            for model in MODELS:
+                if (article["id"], model) not in done:
+                    tasks.append(one(model, article, out))
+        print(f"{len(done)} records already done, running {len(tasks)}")
+        return await tqdm_asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
     results = asyncio.run(run_ner())
-
-    os.makedirs("results", exist_ok=True)
-    with open("results/ner.jsonl", "w") as f:
-        f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in results)
+    errors = sum(1 for r in results if "error" in r)
+    print(f"ner: {len(results)} records, {errors} errors")

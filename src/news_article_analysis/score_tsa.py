@@ -31,11 +31,17 @@ def prf(conf):
 
 
 def main():
-    rows = []
+    rows = {}
     path = sys.argv[1] if len(sys.argv) > 1 else "results/tsa.jsonl"
     with open(path) as f:
         for line in f:
-            rows.append(json.loads(line))
+            r = json.loads(line)
+            k = (r["id"], r["model"])
+            if "error" in r:
+                rows.setdefault(k, r)
+            else:
+                rows[k] = r
+    rows = list(rows.values())
 
     per_model = defaultdict(lambda: {
         "conf": defaultdict(Counter),   # conf[gold][pred]

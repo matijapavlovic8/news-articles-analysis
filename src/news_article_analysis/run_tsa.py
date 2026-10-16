@@ -9,6 +9,7 @@ import tomllib
 import json
 
 MODELS = ["gpt-6-luna", "gpt-6-sol"]
+OUT = "results/tsa.jsonl"
 SENTIMENTS = {0: "neutral", 1: "negative", 2: "positive"}
 PROMPT = """
 Targeted sentiment analysis (TSA) is the task of determining the polarity of sentiment expressed towards the target entity. The entities mentioned in the title will be provided to you and the only thing you need to do is go through the title text and determine the sentiment towards each entity in it. The sentiment can be positive, neutral or negative. Here are a few examples of inputs with the expected output:
@@ -56,7 +57,6 @@ class TSAResponse(BaseModel):
 def inference(model: str, title: str, ner_data: str) -> TSAResponse:
     response = llm.responses.create(
         model=model,
-        temperature=0,
         reasoning=None,
         instructions=PROMPT,
         input=f"""
@@ -80,33 +80,50 @@ def headline_entities(article) -> str:
     ents = [e for e in ner if e["sent"] == 0]
     return "\n".join(f'{i}. {e["text"]} ({e["label"]})' for i, e in enumerate(ents))
 
-async def one(model, article, ner_data) -> dict:
+def load_done() -> set:
+    done = set()
+    if os.path.exists(OUT):
+        for line in open(OUT):
+            r = json.loads(line)
+            if "error" not in r:
+                done.add((r["id"], r["model"]))
+    return done
+
+
+async def one(model, article, ner_data, out) -> dict:
     async with semaphore:
         try:
             resp = await asyncio.to_thread(inference, model, article["title"], ner_data)
-            return {
+            result = {
                 "id": article["id"],
                 "model": model,
                 "tsa": resp.model_dump(),
                 "gold": article["tsa"],
             }
         except Exception as e:
-            return {"id": article["id"], "model": model, "error": str(e)}
+            result = {"id": article["id"], "model": model, "error": str(e)}
+    out.write(json.dumps(result, ensure_ascii=False) + "\n")
+    out.flush()
+    return result
 
 async def run_tsa() -> list:
-    tasks = []
-    for _, article in articles.iterrows():
-        ner_data = headline_entities(article)
-        if not ner_data:
-            continue
-        tasks.extend(one(model, article, ner_data) for model in MODELS)
-    return await tqdm_asyncio.gather(*tasks)
+    done = load_done()
+    os.makedirs("results", exist_ok=True)
+    with open(OUT, "a") as out:
+        tasks = []
+        for _, article in articles.iterrows():
+            ner_data = headline_entities(article)
+            if not ner_data:
+                continue
+            for model in MODELS:
+                if (article["id"], model) not in done:
+                    tasks.append(one(model, article, ner_data, out))
+        print(f"{len(done)} records already done, running {len(tasks)}")
+        return await tqdm_asyncio.gather(*tasks)
 
 
 
 if __name__ == "__main__":
     results = asyncio.run(run_tsa())
-
-    os.makedirs("results", exist_ok=True)
-    with open("results/tsa.jsonl", "w") as f:
-        f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in results)
+    errors = sum(1 for r in results if "error" in r)
+    print(f"tsa: {len(results)} records, {errors} errors")

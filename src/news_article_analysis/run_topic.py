@@ -10,6 +10,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict
 
 MODELS = ["gpt-6-luna", "gpt-6-sol"]
+OUT = "results/topic.jsonl"
 TOPICS = [
     "ARTS, CULTURE, ENTERTAINMENT AND MEDIA",
     "CONFLICTS, WAR AND PEACE",
@@ -83,7 +84,6 @@ class TopicResponse(BaseModel):
 def inference(model: str, title: str, body: str) -> TopicResponse:
     response = llm.responses.create(
         model=model,
-        temperature=0,
         instructions=PROMPT,
         input=f'Title: "{title}"\n\n{body[:MAX_BODY_CHARS]}',
         text={
@@ -98,35 +98,52 @@ def inference(model: str, title: str, body: str) -> TopicResponse:
     return TopicResponse.model_validate_json(response.output_text)
 
 
-async def one(model, article) -> dict:
+def load_done() -> set:
+    done = set()
+    if os.path.exists(OUT):
+        for line in open(OUT):
+            r = json.loads(line)
+            if "error" not in r:
+                done.add((r["id"], r["model"]))
+    return done
+
+
+async def one(model, article, out) -> dict:
     async with semaphore:
         try:
             resp = await asyncio.to_thread(
                 inference, model, article["title"], article["body"]
             )
-            return {
+            result = {
                 "id": article["id"],
                 "model": model,
                 "topics": resp.model_dump()["topics"],
                 "gold": article["topics"],
             }
         except Exception as e:
-            return {"id": article["id"], "model": model, "error": str(e)}
+            result = {"id": article["id"], "model": model, "error": str(e)}
+    out.write(json.dumps(result, ensure_ascii=False) + "\n")
+    out.flush()
+    return result
 
 
 async def run_topic() -> list:
-    tasks = []
-    for _, article in articles.iterrows():
-        topics = article["topics"]
-        if not isinstance(topics, str) or topics in ("", "[]"):
-            continue
-        tasks.extend(one(model, article) for model in MODELS)
-    return await tqdm_asyncio.gather(*tasks)
+    done = load_done()
+    os.makedirs("results", exist_ok=True)
+    with open(OUT, "a") as out:
+        tasks = []
+        for _, article in articles.iterrows():
+            topics = article["topics"]
+            if not isinstance(topics, str) or topics in ("", "[]"):
+                continue
+            for model in MODELS:
+                if (article["id"], model) not in done:
+                    tasks.append(one(model, article, out))
+        print(f"{len(done)} records already done, running {len(tasks)}")
+        return await tqdm_asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
     results = asyncio.run(run_topic())
-
-    os.makedirs("results", exist_ok=True)
-    with open("results/topic.jsonl", "w") as f:
-        f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in results)
+    errors = sum(1 for r in results if "error" in r)
+    print(f"topic: {len(results)} records, {errors} errors")
